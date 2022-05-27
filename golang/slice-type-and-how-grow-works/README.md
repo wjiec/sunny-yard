@@ -726,7 +726,7 @@ func main() {
 }
 ```
 
-根据以上切片扩容的相关知识，我们可以有如下结构图（其中长方体表示一个 `Triangle` 类型）：
+根据以上代码，我们可以画出如下的结构图（其中长方体表示一个 `Triangle` 类型，占用 3 个字节的空间）：
 
 <img src="assets/memory-structure.png" alt="Structure of the memory" style="zoom:50%;" />
 
