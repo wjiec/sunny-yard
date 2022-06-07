@@ -385,7 +385,7 @@ func main() {
 
 ```go
 //
-// runtime.slice.go
+// runtime/slice.go
 //
 
 // growslice handles slice growth during append.
