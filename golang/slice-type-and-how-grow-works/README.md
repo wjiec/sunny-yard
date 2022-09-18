@@ -41,6 +41,16 @@ func main() {
 
 
 
+### 更新
+
+此处记录 Go 在后续对运行时的更新从而导致的切片扩容机制的改变
+
+#### go1.18 修改了计算新切片容量的公式
+
+详细可参考链接：[Go 1.18 Release Notes][18]。详细描述参考本文「[第一部分：计算新切片的容量](#第一部分：计算新切片的容量)」小节。
+
+
+
 ### 约定
 
 本文基于 `go1.16` 版本的源码进行分析，由于自 `go.17` 之后 Go 使用「基于寄存器的调用约定」替代了「基于堆栈的调用约定」。这个修改让编译后的二进制文件更小同时也带来了些微的性能提升，但是同时稍微增加了分析汇编代码的复杂程度。为了便于分析调用和展示运行时的一些特性，所以这里采用 `go1.16` 版本进行分析。
@@ -479,7 +489,7 @@ func growslice(et *_type, old slice, cap int) slice {
 * 如果**新切片所需的最小容量**大于**当前切片容量**的两倍，那么就直接用**新切片所需的最小容量**
 * 如果**新切片所需的最小容量**小于等于**当前切片的容量**的两倍
   * 如果**当前切片的容量**小于 1024 ，则直接把**当前切片的容量**翻倍作为**新切片的容量**
-  * 如果**当前切片的容量**大于等于 1024 ，则每次递增**切片容量**的 1/4 倍，直到大于**新切片所需的最小容量**为止。
+  * 如果**当前切片的容量**大于等于 1024 ，则每次递增**当前切片容量**的 1/4 倍，直到大于**新切片所需的最小容量**为止。
 
 总结以上扩容策略，我们可以用如下伪代码表示：
 
@@ -493,6 +503,165 @@ if CurrCap < 1024
 while CurrCap < NewCap
     CurrCap += CurrCap / 4
 ```
+
+##### Go1.18 计算新切片容量的公式
+
+在 Go1.18 中，官方团队对该公式就行了一轮小更新，使用新公式可以更平滑的对切片进行扩容。对此，官方的描述如下：
+
+>The built-in function `append` now uses a slightly different formula when deciding how much to grow a slice when it must allocate a new underlying array. The new formula is less prone to sudden transitions in allocation behavior.
+
+我们直接来看代码：
+
+```go
+//
+// runtime/slice.go 
+//
+// -- 为了便于分析和展示, 代码经过删减 --
+//
+// et: 切片的元素类型
+// old: 当前切片
+// cap: 新切片所需的最小容量
+func growslice(et *_type, old slice, cap int) slice {
+	// ...
+	newcap := old.cap
+	doublecap := newcap + newcap
+	if cap > doublecap {
+		newcap = cap
+	} else {
+		const threshold = 256
+		if old.cap < threshold {
+			newcap = doublecap
+		} else {
+			// Check 0 < newcap to detect overflow
+			// and prevent an infinite loop.
+			for 0 < newcap && newcap < cap {
+				// Transition from growing 2x for small slices
+				// to growing 1.25x for large slices. This formula
+				// gives a smooth-ish transition between the two.
+				newcap += (newcap + 3*threshold) / 4
+			}
+			// Set newcap to the requested cap when
+			// the newcap calculation overflowed.
+			if newcap <= 0 {
+				newcap = cap
+			}
+		}
+	}
+	// ...
+}
+```
+
+根据以上代码可以整理出如下扩容策略：
+
+* 如果**新切片所需的最小容量**大于**当前切片容量**的两倍，那么就直接用**新切片所需的最小容量**
+* 如果**新切片所需的最小容量**小于等于**当前切片的容量**的两倍
+  * 如果**当前切片的容量**小于 **256** ，则直接把**当前切片的容量**翻倍作为**新切片的容量**
+  * 如果**当前切片的容量**大于等于 **256** ，则每次递增**当前切片容量 + 768 **的 1/4 倍，直到大于**新切片所需的最小容量**为止。
+
+总结以上扩容策略，我们可以用如下伪代码表示：
+
+```pseudocode
+if NewCap > CurrCap * 2
+    return NewCap
+
+Threshold = 256
+if CurrCap < Threshold
+    return CurrCap * 2
+
+while CurrCap < NewCap
+    CurrCap += (CurrCap + 3 * Threshold) / 4
+```
+
+我们可以写个程序来检验下这是否能实现更平滑的对切片进行扩容（平滑的扩容有助于避免内存分配方式的突然转变）：
+
+```go
+func OldFormula(curr, alloc int) int {
+	if alloc > 2*curr {
+		return alloc
+	}
+
+	if curr < 1024 {
+		return 2 * curr
+	}
+
+	for curr < alloc {
+		curr += curr / 4
+	}
+	return curr
+}
+
+func NewFormula(curr, alloc int) int {
+	if alloc > 2*curr {
+		return alloc
+	}
+
+	const threshold = 256
+	if curr < threshold {
+		return 2 * curr
+	}
+
+	for curr < alloc {
+		curr += (curr + 3*threshold) / 4
+	}
+	return curr
+}
+
+//
+// 注意：该程序未考虑匹配内存规格，实际考虑内存规格可能会导致每次更大的分配
+//
+func main() {
+	for i := 1; i <= 8; i++ {
+		var olds, news []int
+		olds = append(olds, i)
+		news = append(news, i)
+		for j := 0; j < 20; j++ {
+			olds = append(olds, OldFormula(olds[j], 2*olds[j]))
+			news = append(news, NewFormula(news[j], 2*news[j]))
+		}
+		fmt.Printf("Start from %d:\n", i)
+		fmt.Printf("  Old: %v\n", olds)
+		fmt.Printf("  New: %v\n", news)
+		fmt.Println()
+	}
+}
+// Start from 1:
+//  Old: [1 2 4 8 16 32 64 128 256 512 1024 2500 6102 14895 36362 88772 216727 529116 1291785 3153770 7699632]
+//  New: [1 2 4 8 16 32 64 128 256 512 1232 3138 6859 14127 28322 70250 172614 422525 1032660 2522248 6158938]
+//
+// Start from 2:
+//  Old: [2 4 8 16 32 64 128 256 512 1024 2500 6102 14895 36362 88772 216727 529116 1291785 3153770 7699632 18797928]
+//  New: [2 4 8 16 32 64 128 256 512 1232 3138 6859 14127 28322 70250 172614 422525 1032660 2522248 6158938 15037575]
+//
+// Start from 3:
+//  Old: [3 6 12 24 48 96 192 384 768 1536 3750 9152 22343 54546 133166 325110 793722 1937796 4730946 11550158 28198626]
+//  New: [3 6 12 24 48 96 192 384 1032 2747 6095 12634 25407 63133 155239 380107 929100 2269415 5541669 13530570 33034723]
+//
+// Start from 4:
+//  Old: [4 8 16 32 64 128 256 512 1024 2500 6102 14895 36362 88772 216727 529116 1291785 3153770 7699632 18797928 45893377]
+//  New: [4 8 16 32 64 128 256 512 1232 3138 6859 14127 28322 70250 172614 422525 1032660 2522248 6158938 15037575 36713934]
+//
+// Start from 5:
+//  Old: [5 10 20 40 80 160 320 640 1280 3125 7627 18618 45452 110965 270908 661395 1614731 3942212 9624540 23497410 57366721]
+//  New: [5 10 20 40 80 160 320 932 1888 4419 9360 19013 47523 117127 287059 701932 1714807 4187645 10224848 24964114 60948648]
+//
+// Start from 6:
+//  Old: [6 12 24 48 96 192 384 768 1536 3750 9152 22343 54546 133166 325110 793722 1937796 4730946 11550158 28198626 68844300]
+//  New: [6 12 24 48 96 192 384 1032 2747 6095 12634 25407 63133 155239 380107 929100 2269415 5541669 13530570 33034723 80652283]
+//
+// Start from 7:
+//  Old: [7 14 28 56 112 224 448 896 1792 4375 10678 26066 63635 155356 379285 925987 2260707 5519301 13474853 32897588 80316376]
+//  New: [7 14 28 56 112 224 448 1132 2942 6477 13382 26867 66697 163939 401345 980952 2396008 5850734 14285123 34876892 85149767]
+//
+// Start from 8:
+//  Old: [8 16 32 64 128 256 512 1024 2500 6102 14895 36362 88772 216727 529116 1291785 3153770 7699632 18797928 45893377 112044376]
+//  New: [8 16 32 64 128 256 512 1232 3138 6859 14127 28322 70250 172614 422525 1032660 2522248 6158938 15037575 36713934 89634733]
+```
+
+由上面结果可以得到大概的结论，新的切片扩容公式在前期会倾向于多分配一点，在后期会比旧公式分配更少的内存。整体来说确实如官方所说更平滑了。
+
+
+
+
 
 #### 第二部分：进行内存分配
 
@@ -851,3 +1020,5 @@ s = append(s, make([]Array, 26)...)
 [15]: https://stackoverflow.com/questions/30146642/what-are-the-conditional-jump-instructions-for-gos-assembler "What are the conditional jump instructions for Go's assembler?"
 [16]: http://www.unixwiz.net/techtips/x86-jumps.html "Intel x86 JUMP quick reference"
 [17]: https://9p.io/sys/doc/asm.html "A Manual for the Plan 9 assembler"
+[18]: https://go.dev/doc/go1.18#runtime "Go 1.18 Release Notes"
+
