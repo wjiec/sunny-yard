@@ -1,7 +1,7 @@
 restic design
 -------------
 
-原文链接：[restic/references/design][https://restic.readthedocs.io/en/latest/100_references.html]
+原文链接：[restic/references/design](https://restic.readthedocs.io/en/latest/100_references.html)
 
 
 
@@ -501,3 +501,6 @@ restic 程序保证以下内容：
 
 * 支持对二进制对象（文件和文件树）、索引、锁、快照文件进行压缩存储
 
+
+
+[https://restic.readthedocs.io/en/latest/100_references.html]: 
